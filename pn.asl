@@ -4,14 +4,13 @@ state("pcsx2", "null") {}
 
 startup
 {
-
+    
 }
 
 init
 {
     vars.PCSX2_OFFSET = 0x20000000;
     vars.lua_State = IntPtr.Zero;   
-    vars.GSGlobal = IntPtr.Zero;
     vars.BBComplete = false;
 
     // Boolean values to check if the split has already been hit
@@ -29,13 +28,15 @@ init
         uint step = (l >> 5)|1;
         for (int i = 0; l >= step; l -= step, i += 1)
         {
-            uint c = (uint)str[i];
-            h = (uint)(h ^ ((h<<5)+(h>>2)+c));
+            uint c = (uint)(byte)str[i];
+            uint a = (uint)(h<<5);
+            uint b = (uint)(h>>2);
+            h = (uint)(h ^ (a+b+c));
         }
         return h;
     });
 
-    vars.LuaGetVar = (Func<IntPtr, String, Tuple<IntPtr, byte>>)((t, str) =>
+    vars.LuaGetStr = (Func<IntPtr, String, Tuple<IntPtr, byte>>)((t, str) =>
     {
         // luaH_getstr (custom version for Psychonauts where I don't know what's going on)
         uint hash = vars.LuaHashString(str);
@@ -44,13 +45,12 @@ init
         int SIZE_OF_NODE = 0xC; // wtf where are the two TObject and next ???
         IntPtr n = (IntPtr)memory.ReadValue<int>(t);
         n = IntPtr.Add(n, vars.PCSX2_OFFSET);
-        n = IntPtr.Add(n, (int)(SIZE_OF_NODE * (hash&(tsize-1))));
+        IntPtr curr = IntPtr.Add(n, (int)(SIZE_OF_NODE * (hash&(tsize-1))));
 
         // :/
         byte TYPE_STRING = 3;
 
         short next_index;
-        IntPtr curr = n;
         while (true)
         {
             byte otype = memory.ReadValue<byte>(IntPtr.Add(curr, 0x8));
@@ -66,6 +66,7 @@ init
             }
 
             next_index = memory.ReadValue<short>(IntPtr.Add(curr, 0xA));
+
             if (next_index == 0)
             {
                 // nil
@@ -73,7 +74,7 @@ init
             }
 
             next_index = (short)((next_index - 1) * SIZE_OF_NODE);
-            curr = IntPtr.Add(curr, next_index);
+            curr = IntPtr.Add(n, next_index);
         }
     });
 
@@ -90,7 +91,38 @@ init
         gt = (IntPtr)memory.ReadValue<int>(gt);
         IntPtr t = IntPtr.Add(gt, vars.PCSX2_OFFSET);
 
-        return vars.LuaGetVar(t, str);
+        return vars.LuaGetStr(t, str);
+    });
+
+    vars.IsLevelComplete = (Func<String, bool>)(str => 
+    {
+        if (vars.lua_State == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var o = vars.LuaGetGlobal("Global");
+        var Global = o.Item1;
+        o = vars.LuaGetStr(Global, "saved");
+        var Global_Saved = o.Item1;
+        o = vars.LuaGetStr(Global_Saved, "Global");
+        var GSGlobal = o.Item1;
+        o = vars.LuaGetStr(GSGlobal, "b" + str + "Completed");
+        var LevelComplete = o.Item1;
+        // This is a number... whoops
+        if (LevelComplete != IntPtr.Zero)
+        {
+            LevelComplete = IntPtr.Add(LevelComplete, -vars.PCSX2_OFFSET);
+        }
+        //print(String.Format("Level Complete val {0:X8}", LevelComplete));
+
+        switch ((int)LevelComplete)
+        {
+            case 0:
+                return false;
+            default:
+                return true;
+        }
     });
 }
  
@@ -106,6 +138,15 @@ reset
 
 update
 {
+	// Clear any hit splits if timer stops
+	if (timer.CurrentPhase == TimerPhase.NotRunning)
+	{
+		vars.Splits.Clear();
+        vars.lua_State = IntPtr.Zero;
+        vars.BBComplete = false;
+        return;
+	}
+
     // lua_State active yet? yeah I know this is garbage
     if (vars.lua_State == IntPtr.Zero)
     {
@@ -129,15 +170,19 @@ update
                 var Global = o.Item1;
                 print(String.Format("Global obj: {0:X8}", (int)Global));
 
-                o = vars.LuaGetVar(Global, "saved");
+                o = vars.LuaGetStr(Global, "saved");
                 var Global_Saved = o.Item1;
                 print(String.Format("Global:saved obj: {0:X8}", (int)Global_Saved));
+                IntPtr f = IntPtr.Add(Global_Saved,0x8);
+                print(String.Format("Global:saved size: {0:X8}", memory.ReadValue<int>(f)));
 
-                o = vars.LuaGetVar(Global_Saved, "Global");
-                vars.GSGlobal = o.Item1;
-                print(String.Format("Global:saved:Global obj {0:X8}", (int)vars.GSGlobal));
+                o = vars.LuaGetStr(Global_Saved, "Global");
+                var GSGlobal = o.Item1;
+                print(String.Format("Global:saved:Global obj {0:X8}", (int)GSGlobal));
+                f = IntPtr.Add(GSGlobal,0x8);
+                print(String.Format("Global:saved:Global size: {0:X8}", memory.ReadValue<int>(f)));
 
-                o = vars.LuaGetVar(vars.GSGlobal, "bLoadedFromMainMenu");
+                o = vars.LuaGetStr(GSGlobal, "bLoadedFromMainMenu");
                 var LMainMenu = o.Item1;
                 // This is a number... whoops
                 if (LMainMenu != IntPtr.Zero)
@@ -145,6 +190,16 @@ update
                     LMainMenu = IntPtr.Add(LMainMenu, -vars.PCSX2_OFFSET);
                 }
                 print(String.Format("Global:saved:Global:bLoadedFromMainMenu obj {0:X8}", (int)LMainMenu));
+
+                o = vars.LuaGetStr(GSGlobal, "bBBCompleted");
+                print(String.Format("hash {0:X8}", vars.LuaHashString("bBBCompleted")));
+                var BBComplete = o.Item1;
+                // This is a number... whoops
+                if (BBComplete != IntPtr.Zero)
+                {
+                    BBComplete = IntPtr.Add(BBComplete, -vars.PCSX2_OFFSET);
+                }
+                print(String.Format("Global:saved:Global:bBBCompleted obj {0:X8}", (int)BBComplete));
             }
         }
     }
@@ -155,5 +210,16 @@ update
 
 split
 {
+    // do the funny split on completing the first level
+    if (!vars.BBComplete)
+    {
+        if (vars.IsLevelComplete("BB"))
+        {
+            // We did it!
+            print("Yeah baby, that's what I'm talking about. Wooooo!");
+            vars.BBComplete = true;
+            return true;
+        }
+    }
     return false;
 }
